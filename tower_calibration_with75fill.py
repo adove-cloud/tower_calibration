@@ -4,17 +4,12 @@
 This script generates a GDSII (GDS) file for e-beam lithography 
 calibration towers, often used for proximity effect correction (PEC) testing.
 
-It creates a "Top" cell containing four patterns with different fill densities:
+It creates a "Top" cell containing patterns with different fill densities:
 - 100% fill (a solid square with a center line gap)
+- Custom fill (user-defined between 51% and 75%, optional)
 - 50% fill (a grating of lines)
 - 25% fill (a grating of lines with larger spacing)
 - 0% fill (a single, isolated line)
-
-The script prompts the user for three key parameters:
-1.  Output Filename: The name of the GDS file to be created.
-2.  Beta Value: The proximity effect backscattering parameter (in microns), 
-    typically derived from a TRACER or similar simulation.
-3.  Linewidth: The target critical dimension (CD) for the lines (in nanometers).
 """
 
 import gdstk
@@ -25,10 +20,7 @@ def get_user_input():
     Prompts the user for required inputs and validates them.
     
     Returns:
-        tuple: (filename, beta, line_size)
-               filename (str): The validated output GDS filename.
-               beta (float): The beta value in microns.
-               line_size (float): The linewidth in microns.
+        tuple: (filename, beta, line_size, custom_fill)
     """
     # 1. Get Filename
     filename = input("Enter the output GDS filename (e.g., my_towers.gds): ")
@@ -60,13 +52,25 @@ def get_user_input():
         except ValueError:
             print("Error: Invalid input. Please enter a number (e.g., 80).")
 
+    # 4. Get Custom Fill Percentage
+    while True:
+        try:
+            custom_fill_str = input("Enter custom fill percentage between 51 and 75 (enter 0 to skip): ")
+            custom_fill = float(custom_fill_str)
+            if custom_fill == 0 or (51 <= custom_fill <= 75):
+                break
+            else:
+                print("Error: Value must be 0, or between 51 and 75.")
+        except ValueError:
+            print("Error: Invalid input. Please enter a valid number.")
+
     # Convert nm to microns for GDS generation
     line_size = line_size_nm / 1000.0
     
-    return filename, beta, line_size
+    return filename, beta, line_size, custom_fill
 
 
-def create_gds_towers(filename, beta, line_size):
+def create_gds_towers(filename, beta, line_size, custom_fill):
     """
     Generates the GDS tower structures and saves them to a file.
     """
@@ -76,21 +80,11 @@ def create_gds_towers(filename, beta, line_size):
     lib = gdstk.Library()
 
     # --- Calculations ---
-    # Pitch for 50% fill (line_size = space_size)
     pitch = 2 * line_size
-    
-    # Pitch for 75% fill (line_size = 3/4 of pitch -> pitch = line_size / 0.75)
-    pitch_75 = line_size / 0.75
-    
-    # Pitch for 25% fill is 2 * pitch (line_size = 1/4 of pitch)
     pitch_25 = 2 * pitch
     
-    # Calculate square size based on 25% fill requirements (consistent with your original)
     number_of_gratings_25_fill = math.ceil(4 * beta / pitch_25)
     square_size = number_of_gratings_25_fill * pitch_25
-    
-    # Calculate counts for other gratings to match the square size footprint
-    number_of_gratings_75_fill = math.ceil(square_size / pitch_75)
     number_of_gratings_50_fill = math.ceil(square_size / pitch)
 
     # --- Cell Definitions ---
@@ -100,15 +94,32 @@ def create_gds_towers(filename, beta, line_size):
                            (line_size / 2, square_size / 2))
     c_line.add(rect)
 
-    # --- Pattern Assembly ---
+    # --- Dynamic Y-Positioning ---
     y_gap = 4 * beta
-    # Calculate Y positions sequentially
     y_pos_100 = 0
-    y_pos_75 = square_size + y_gap
-    y_pos_50 = 2 * (square_size + y_gap)
-    y_pos_25 = 3 * (square_size + y_gap)
-    y_pos_0 = 4 * (square_size + y_gap)
+    current_y = square_size + y_gap
 
+    has_custom_block = custom_fill > 0
+    
+    if has_custom_block:
+        y_pos_custom = current_y
+        current_y += square_size + y_gap
+        
+        # Calculate specific parameters for the custom block
+        pitch_custom = line_size / (custom_fill / 100.0)
+        number_of_gratings_custom_fill = math.ceil(square_size / pitch_custom)
+        origin_x_custom = -(number_of_gratings_custom_fill - 1) * pitch_custom / 2
+
+    y_pos_50 = current_y
+    current_y += square_size + y_gap
+    
+    y_pos_25 = current_y
+    current_y += square_size + y_gap
+    
+    y_pos_0 = current_y
+
+    # --- Pattern Assembly ---
+    
     # 1. 100% fill section
     array_100_fill = gdstk.rectangle((-square_size / 2, -square_size / 2 + y_pos_100),
                                      (square_size / 2, square_size / 2 + y_pos_100))
@@ -118,18 +129,22 @@ def create_gds_towers(filename, beta, line_size):
     cell.add(*gdstk.boolean(array_100_fill, center_fill_gap, "not"))
     cell.add(gdstk.Reference(c_line, origin=(0, y_pos_100)))
 
-    # Centering math for the gratings
-    origin_x_75 = -(number_of_gratings_75_fill - 1) * pitch_75 / 2
+    # 2. Custom fill section (Conditional)
+    if has_custom_block:
+        array_custom_fill = gdstk.Reference(
+            c_line,
+            origin=(origin_x_custom, y_pos_custom),
+            columns=number_of_gratings_custom_fill,
+            spacing=(pitch_custom, 0)
+        )
+        cell.add(array_custom_fill)
+        print(f"Added custom {custom_fill}% fill block.")
+    else:
+        print("Skipped custom fill block.")
+
+    # Centering math for remaining gratings
     origin_x_50 = -(number_of_gratings_50_fill - 1) * pitch / 2
     origin_x_25 = -(number_of_gratings_25_fill - 1) * pitch_25 / 2
-
-    # 2. 75% fill section (NEWLY ADDED)
-    array_75_fill = gdstk.Reference(
-        c_line,
-        origin=(origin_x_75, y_pos_75),
-        columns=number_of_gratings_75_fill,
-        spacing=(pitch_75, 0)
-    )
 
     # 3. 50% fill section
     array_50_fill = gdstk.Reference(
@@ -150,22 +165,17 @@ def create_gds_towers(filename, beta, line_size):
     # 5. 0% fill section
     array_0_fill = gdstk.Reference(c_line, origin=(0, y_pos_0))
 
-    # Add all arrays to the top cell
-    cell.add(array_75_fill, array_50_fill, array_25_fill, array_0_fill)
+    # Add standard arrays to the top cell
+    cell.add(array_50_fill, array_25_fill, array_0_fill)
 
     # --- File Output ---
     lib.write_gds(filename)
-    print(f"\nSuccessfully wrote GDS file with 75% fill tower to: {filename}")
+    print(f"\nSuccessfully wrote GDS file to: {filename}")
 
 
 if __name__ == "__main__":
-    # This block runs only when the script is executed directly
     try:
-        # Get inputs from the user
-        fname, val_beta, val_line_size = get_user_input()
-        
-        # Generate the GDS file
-        create_gds_towers(fname, val_beta, val_line_size)
-        
+        fname, val_beta, val_line_size, val_custom_fill = get_user_input()
+        create_gds_towers(fname, val_beta, val_line_size, val_custom_fill)
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
